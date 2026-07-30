@@ -28,3 +28,9 @@ htmlcov/
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# Media files
+*.mp4
+*.mkv
+*.avi
+*.mov

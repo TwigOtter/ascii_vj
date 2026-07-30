@@ -117,6 +117,7 @@ class AsciiVJApp:
 		self.fg_palette = tk.StringVar(value="ff0050,00ffff,ffff00")
 
 		self.bpm = tk.StringVar()
+		self.auto_beats = tk.BooleanVar(value=False)
 		self.brightness_clamp = tk.DoubleVar(value=1.0)
 		self.seed = tk.StringVar()
 		self.max_frames = tk.StringVar()
@@ -287,9 +288,18 @@ class AsciiVJApp:
 
 		bpm_label = ttk.Label(color_frame, text="BPM")
 		bpm_label.grid(row=2, column=2, sticky="w", pady=4)
-		bpm_entry = ttk.Entry(color_frame, textvariable=self.bpm)
-		bpm_entry.grid(row=2, column=3, sticky="ew", pady=4)
-		self._add_tooltip("Beats per minute for beat-synced color changes. Leave empty for no beat sync.", bpm_label, bpm_entry)
+		self.bpm_entry = ttk.Entry(color_frame, textvariable=self.bpm)
+		self.bpm_entry.grid(row=2, column=3, sticky="ew", pady=4)
+		self._add_tooltip("Beats per minute for beat-synced color changes. Leave empty for no beat sync. Disabled when auto-detect beats is on.", bpm_label, self.bpm_entry)
+
+		auto_beats_toggle = ttk.Checkbutton(
+			color_frame,
+			text="Auto-detect beats from audio",
+			variable=self.auto_beats,
+			command=self._sync_beat_mode_state,
+		)
+		auto_beats_toggle.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+		self._add_tooltip("Detect beat timestamps directly from the input video's audio track instead of assuming a fixed BPM. Requires librosa (pip install librosa soundfile).", auto_beats_toggle)
 
 		glyph_frame = ttk.LabelFrame(parent, text="Glyphs", padding=10)
 		glyph_frame.pack(fill=tk.X, pady=(10, 0))
@@ -384,11 +394,15 @@ class AsciiVJApp:
 		self.output_path.set(str(default_out))
 		self.remux_output_path.set(str(default_remux))
 		self._sync_remux_state()
+		self._sync_beat_mode_state()
 
 	def _sync_remux_state(self):
 		state = "normal" if self.remux_enabled.get() else "disabled"
 		self.remux_entry.configure(state=state)
 		self.remux_browse.configure(state=state)
+
+	def _sync_beat_mode_state(self):
+		self.bpm_entry.configure(state="disabled" if self.auto_beats.get() else "normal")
 
 	def browse_input(self):
 		path = filedialog.askopenfilename(
@@ -562,6 +576,7 @@ class AsciiVJApp:
 			bg_palette=parse_color_list(self.bg_palette.get().strip()),
 			fg_palette=parse_color_list(self.fg_palette.get().strip()),
 			bpm=bpm,
+			auto_beats=self.auto_beats.get(),
 			brightness_clamp=float(self.brightness_clamp.get()),
 			seed=seed,
 			transparent_bg=False,

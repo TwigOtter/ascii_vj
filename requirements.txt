@@ -1,0 +1,6 @@
+opencv-python
+numpy<2.5  # numba (via librosa) doesn't support NumPy 2.5+ yet
+Pillow
+imageio-ffmpeg
+librosa
+soundfile
