@@ -68,7 +68,7 @@ if ($Clean) {
 }
 
 Write-Host "Installing build dependencies..." -ForegroundColor Cyan
-& $PythonExe @pythonBaseArgs -m pip install --upgrade pyinstaller imageio-ffmpeg opencv-python pillow numpy | Out-Host
+& $PythonExe @pythonBaseArgs -m pip install --upgrade pyinstaller imageio-ffmpeg opencv-python pillow "numpy<2.5" librosa soundfile | Out-Host
 if ($LASTEXITCODE -ne 0) {
 	Write-Error "Failed to install build dependencies."
 	exit $LASTEXITCODE
@@ -88,6 +88,9 @@ $arguments = @(
 	"--collect-all", "imageio_ffmpeg",
 	"--collect-all", "cv2",
 	"--collect-all", "PIL",
+	"--collect-all", "librosa",
+	"--collect-all", "soundfile",
+	"--collect-submodules", "numba",
 	"$repoRoot\ascii_vj_ui.py"
 )
 
