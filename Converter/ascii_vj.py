@@ -28,6 +28,7 @@ Usage example:
 import argparse
 import os
 import random
+import subprocess
 import sys
 from dataclasses import dataclass, field
 
@@ -77,11 +78,11 @@ class Config:
     key_tol_s: int = 100                  # min saturation to count as "green screen"
     key_tol_v: int = 70                   # min value to count as "green screen"
 
-    bg_mode: str = "whitespace"           # whitespace | char | random
+    bg_mode: str = "whitespace"           # whitespace | char | random | solid
     bg_char: str = "."
 
     bg_color_mode: str = "static"         # static | beat-cycle | beat-random-per-char
-    fg_color_mode: str = "static"         # static | beat-cycle | beat-random-per-char
+    fg_color_mode: str = "static"         # static | beat-cycle | beat-random-per-char | source
     bg_color: tuple = (15, 15, 20)
     fg_color: tuple = (255, 255, 255)
     bg_palette: list = field(default_factory=lambda: [(255, 0, 80), (0, 255, 255), (255, 255, 0)])
@@ -93,6 +94,7 @@ class Config:
 
     out_w: int = None                     # output pixel size; default = cols*cell_w
     out_h: int = None
+    transparent_bg: bool = False          # write keyed background as transparent alpha
 
 
 def hex_to_rgb(h):
@@ -224,33 +226,95 @@ def frame_to_grid(frame_bgr, cols, cell_aspect):
     return small, gray, rows
 
 
-def composite_frame(char_idx_grid, color_grid, templates):
-    """Vectorized: gather glyph alpha per cell, multiply by per-cell color,
-    reshape into the full output canvas. No per-cell Python loop."""
+def composite_frame(char_idx_grid, color_grid, templates, transparent_bg=False, fg_mask=None,
+                    solid_bg=False, bg_mask=None):
+    """Vectorized: gather glyph alpha per cell, apply per-cell color,
+    and reshape into full output canvas. No per-cell Python loop."""
     rows, cols = char_idx_grid.shape
     ch, cw = templates.shape[1], templates.shape[2]
 
     # gather: (rows, cols, ch, cw)
-    alpha = templates[char_idx_grid]  # fancy indexing
-    alpha = alpha.transpose(0, 2, 1, 3).reshape(rows * ch, cols * cw)  # (H, W)
+    alpha_cells = templates[char_idx_grid]  # fancy indexing
+    if fg_mask is not None:
+        alpha_cells = alpha_cells * fg_mask[:, :, None, None].astype(np.float32)
+
+    alpha = alpha_cells.transpose(0, 2, 1, 3).reshape(rows * ch, cols * cw)  # (H, W)
 
     color_full = np.broadcast_to(
         color_grid[:, None, :, None, :], (rows, ch, cols, cw, 3)
-    ).transpose(0, 1, 2, 3, 4).reshape(rows * ch, cols * cw, 3)
-    # note: broadcast_to above already puts ch/cw in the right spots
+    ).reshape(rows * ch, cols * cw, 3)
+
+    if transparent_bg:
+        rgb = color_full.clip(0, 255).astype(np.uint8)
+        a = alpha.clip(0, 255).astype(np.uint8)
+        return np.dstack((rgb, a))
 
     alpha_n = (alpha / 255.0)[..., None]
     canvas = (alpha_n * color_full).clip(0, 255).astype(np.uint8)
+
+    if solid_bg and bg_mask is not None:
+        bg_mask_full = np.broadcast_to(
+            bg_mask[:, None, :, None, None], (rows, ch, cols, cw, 1)
+        ).reshape(rows * ch, cols * cw, 1)
+        bg_color_full = color_full.clip(0, 255).astype(np.uint8)
+        canvas = np.where(bg_mask_full, bg_color_full, canvas)
+
     return canvas
+
+
+class ConversionCancelled(Exception):
+    pass
+
+
+class TransparentMovWriter:
+    """Writes RGBA frames to a .mov using ffmpeg qtrle codec (supports alpha)."""
+
+    def __init__(self, output_path, fps, width, height):
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:
+            raise RuntimeError(
+                "Transparent output requires imageio-ffmpeg. Install with: pip install imageio-ffmpeg"
+            ) from e
+
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-s", f"{width}x{height}",
+            "-r", str(float(fps)),
+            "-i", "-",
+            "-an",
+            "-c:v", "qtrle",
+            "-pix_fmt", "argb",
+            output_path,
+        ]
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    def write(self, frame_rgba):
+        if self.proc.stdin is None:
+            raise RuntimeError("ffmpeg writer stdin is not available")
+        self.proc.stdin.write(frame_rgba.tobytes())
+
+    def release(self):
+        if self.proc.stdin is not None:
+            self.proc.stdin.close()
+        rc = self.proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg failed while writing transparent output (exit code {rc})")
 
 
 # --------------------------------------------------------------------------
 # Main conversion
 # --------------------------------------------------------------------------
 
-def convert(cfg: Config, max_frames=None, progress_every=30):
-    rng = random.Random(cfg.seed) if cfg.seed is not None else random.Random()
+def convert(cfg: Config, max_frames=None, progress_every=30, cancel_event=None):
     np_rng = np.random.default_rng(cfg.seed)
+
+    if cfg.transparent_bg and not cfg.output_path.lower().endswith(".mov"):
+        raise RuntimeError("Transparent output requires a .mov output path (e.g. out/output_alpha.mov)")
 
     cap = cv2.VideoCapture(cfg.input_path)
     if not cap.isOpened():
@@ -275,9 +339,14 @@ def convert(cfg: Config, max_frames=None, progress_every=30):
 
     bg_color_state = None
     fg_color_state = None
+    cancelled = False
 
     frame_idx = 0
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
+
         ret, frame = cap.read()
         if not ret:
             break
@@ -289,12 +358,14 @@ def convert(cfg: Config, max_frames=None, progress_every=30):
         if bg_color_state is None:
             bg_color_state = ColorState(cfg.bg_color_mode, cfg.bg_color, cfg.bg_palette,
                                          rows, cfg.cols, np_rng, cfg.brightness_clamp)
-            fg_color_state = ColorState(cfg.fg_color_mode, cfg.fg_color, cfg.fg_palette,
-                                         rows, cfg.cols, np_rng, cfg.brightness_clamp)
+            if cfg.fg_color_mode != "source":
+                fg_color_state = ColorState(cfg.fg_color_mode, cfg.fg_color, cfg.fg_palette,
+                                             rows, cfg.cols, np_rng, cfg.brightness_clamp)
 
         if beat_clock.is_beat(frame_idx) and frame_idx != 0:
             bg_color_state.roll()
-            fg_color_state.roll()
+            if fg_color_state is not None:
+                fg_color_state.roll()
 
         # chroma key on the small frame (cheap + matches grid resolution)
         is_bg = chroma_key_mask(small, cfg.key_hex, cfg.key_tol_h, cfg.key_tol_s, cfg.key_tol_v)
@@ -305,7 +376,7 @@ def convert(cfg: Config, max_frames=None, progress_every=30):
         char_idx_grid = ramp_idx_lut[lum_idx]
 
         # background fill
-        if cfg.bg_mode == "whitespace":
+        if cfg.bg_mode in ("whitespace", "solid"):
             bg_idx = char_to_idx.get(" ", char_to_idx[ramp[0]])
             char_idx_grid = np.where(is_bg, bg_idx, char_idx_grid)
         elif cfg.bg_mode == "char":
@@ -315,16 +386,35 @@ def convert(cfg: Config, max_frames=None, progress_every=30):
             rand_idx = np_rng.integers(0, len(charset_full), size=char_idx_grid.shape)
             char_idx_grid = np.where(is_bg, rand_idx, char_idx_grid)
 
-        color_grid = np.where(is_bg[..., None], bg_color_state.current, fg_color_state.current)
+        if cfg.fg_color_mode == "source":
+            fg_current = cv2.cvtColor(small, cv2.COLOR_BGR2RGB).astype(np.float32)
+        else:
+            fg_current = fg_color_state.current
 
-        canvas = composite_frame(char_idx_grid, color_grid, templates)
+        color_grid = np.where(is_bg[..., None], bg_color_state.current, fg_current)
+
+        canvas = composite_frame(
+            char_idx_grid,
+            color_grid,
+            templates,
+            transparent_bg=cfg.transparent_bg,
+            fg_mask=((~is_bg) if cfg.transparent_bg else None),
+            solid_bg=(cfg.bg_mode == "solid"),
+            bg_mask=is_bg,
+        )
 
         if writer is None:
             h_out, w_out = canvas.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(cfg.output_path, fourcc, fps, (w_out, h_out))
+            if cfg.transparent_bg:
+                writer = TransparentMovWriter(cfg.output_path, fps, w_out, h_out)
+            else:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(cfg.output_path, fourcc, fps, (w_out, h_out))
 
-        writer.write(cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+        if cfg.transparent_bg:
+            writer.write(canvas)
+        else:
+            writer.write(cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
 
         frame_idx += 1
         if frame_idx % progress_every == 0:
@@ -333,6 +423,8 @@ def convert(cfg: Config, max_frames=None, progress_every=30):
     cap.release()
     if writer:
         writer.release()
+    if cancelled:
+        raise ConversionCancelled("Conversion cancelled by user.")
     print(f"Done: {frame_idx} frames -> {cfg.output_path}", file=sys.stderr)
 
 
@@ -360,11 +452,11 @@ def build_argparser():
     p.add_argument("--key-tol-s", type=int, default=100)
     p.add_argument("--key-tol-v", type=int, default=70)
 
-    p.add_argument("--bg-mode", choices=["whitespace", "char", "random"], default="whitespace")
+    p.add_argument("--bg-mode", choices=["whitespace", "char", "random", "solid"], default="whitespace")
     p.add_argument("--bg-char", default=".")
 
     p.add_argument("--bg-color-mode", choices=["static", "beat-cycle", "beat-random-per-char"], default="static")
-    p.add_argument("--fg-color-mode", choices=["static", "beat-cycle", "beat-random-per-char"], default="static")
+    p.add_argument("--fg-color-mode", choices=["static", "beat-cycle", "beat-random-per-char", "source"], default="static")
     p.add_argument("--bg-color", default="0f0f14")
     p.add_argument("--fg-color", default="ffffff")
     p.add_argument("--bg-palette", default="ff0050,00ffff,ffff00")
@@ -373,6 +465,8 @@ def build_argparser():
     p.add_argument("--bpm", type=float, default=None)
     p.add_argument("--brightness-clamp", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--transparent-bg", action="store_true",
+                    help="Keyed background becomes transparent alpha. Requires .mov output.")
     p.add_argument("--max-frames", type=int, default=None, help="limit frames, for quick tests")
     return p
 
@@ -402,9 +496,15 @@ def main():
         bpm=args.bpm,
         brightness_clamp=args.brightness_clamp,
         seed=args.seed,
+        transparent_bg=args.transparent_bg,
     )
     convert(cfg, max_frames=args.max_frames)
 
 
 if __name__ == "__main__":
     main()
+
+# --------------------------------------------------------------------------
+# To mux your original audio back in afterward:
+#   ffmpeg -i output.mp4 -i original_set_audio.wav -c:v copy -map 0:v:0 -map 1:a:0 -shortest final.mp4
+# --------------------------------------------------------------------------
