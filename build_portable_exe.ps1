@@ -132,6 +132,9 @@ $arguments = @(
 	"--collect-all", "imageio_ffmpeg",
 	"--collect-all", "cv2",
 	"--collect-all", "PIL",
+	"--collect-all", "librosa",
+	"--collect-all", "soundfile",
+	"--collect-submodules", "numba",
 	"$repoRoot\ascii_vj_ui.py"
 )
 
