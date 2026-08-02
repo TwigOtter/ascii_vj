@@ -35,8 +35,15 @@ jobs:
     #     flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
     #     # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
     #     flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Pull Lastest Version of UPX
+      uses: robinraju/release-downloader@v1
+      with:
+        repository: upx/upx
+        latest: true
+        fileName: 'upx-5.2.0-win64.zip'
+        extract: true
     - name: Package Application
-      run: pyinstaller src/build.spec
+      run: pyinstaller src/build.spec --upx-dir=.\upx-5.2.0-win64
     - uses: actions/upload-artifact@v4
       with:
         name: TwigsAsciiVJConverter.exe
