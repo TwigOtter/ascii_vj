@@ -3,22 +3,43 @@
 Turns green-screen dance footage into chroma-keyed, beat-synced ASCII art -- 
 built as a silly side project for VRChat DJ events, but hey, it's pretty cool!
 
-Dependencies needed to run `build_portable_exe.ps1`:
+## What this is for
 
-- PowerShell (`pwsh`)
-- Python 3
-- `pip`
-- Internet access to install Python build packages
+The intended pipeline: record yourself dancing in front of a green screen
+(e.g. a VRChat avatar recording), then run that footage through this tool to
+get an ASCII-art cutout of just the dancer, with colors that shift and pulse
+on the beat.
 
-The build script installs these Python packages automatically:
+Because the background is chroma-keyed out first, you get a clean character-art
+silhouette of just the subject — no ASCII-ifying a background you don't want.
+Colors can be static, cycle through a palette on the beat, go fully random per
+character for a glitchy/chaotic look, or pull straight from the source
+footage's actual colors.
 
-- `pyinstaller`
-- `imageio-ffmpeg`
-- `opencv-python`
-- `pillow`
-- `numpy`
+## Two ways to use it
 
-From the repository root, run:
+### 1. GUI (`ascii_vj_ui.py`)
+
+_Shoutout to Dralzin for this UI design :3_
+
+The easiest path if you don't want to touch a terminal. A Tkinter app with
+three tabs:
+
+- **Job** — pick input/output files, and optionally enable "remux original
+  audio after conversion" to get a second output file with the DJ track
+  audio muxed back in (the ASCII conversion itself produces a silent video).
+- **Style** — charset, colors, palettes, beat/BPM settings, font.
+- **Advanced** — chroma-key tuning, brightness clamp (for photosensitivity
+  safety on the random-color modes), random seed, frame limit for quick tests.
+
+Run it directly:
+
+```bash
+python ascii_vj_ui.py
+```
+
+Or build a portable Windows `.exe` that doesn't require Python installed on
+the target machine:
 
 ```powershell
 ./build_portable_exe.ps1 -Clean
