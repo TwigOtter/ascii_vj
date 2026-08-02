@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = ['Converter.ascii_vj', 'Remux.audio_remux_simple', 'PIL._tkinter_finder', 'pkg_resources.extern']
+hiddenimports = ['Converter.ascii_vj', 'Remux.audio_remux_simple', 'PIL._tkinter_finder', 'pkg_resources']
 hiddenimports += collect_submodules('numba')
 tmp_ret = collect_all('imageio_ffmpeg')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
