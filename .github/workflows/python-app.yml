@@ -9,7 +9,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -42,32 +42,23 @@ jobs:
         extract: true
     - name: Package Application
       run: pyinstaller src/build.spec --upx-dir=.\upx-5.2.0-win64
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: TwigsAsciiVJConverter
         path: dist/TwigsAsciiVJConverter.exe
         retention-days: 5
-  release:
+  publish:
     needs: build
     runs-on: windows-latest
 
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: TwigsAsciiVJConverter
-      - name: Create Release
-        uses: actions/create-release@v1
-        id: create_release
+      - name: Upload windows artifact to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          release_name: Release ${{ github.ref }}
-          tag_name: ${{ github.ref }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Upload windows artifact
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/TwigsAsciiVJConverter.exe
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/TwigsAsciiVJConverter.exe
           asset_name: TwigsAsciiVJConverter.exe
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          tag: ${{ github.ref }}
