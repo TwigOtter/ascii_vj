@@ -49,9 +49,35 @@ function Resolve-PythonExe {
 	return $null
 }
 
+function Try-InstallPython {
+	$winget = Get-Command winget -ErrorAction SilentlyContinue | Select-Object -First 1
+	if (-not $winget) {
+		return $false
+	}
+
+	$pythonPackageIds = @("Python.Python.3.12", "Python.Python.3.11")
+	foreach ($packageId in $pythonPackageIds) {
+		Write-Host "Attempting to install Python via winget package: $packageId" -ForegroundColor Cyan
+		& $winget.Source install --id $packageId -e --source winget --accept-source-agreements --accept-package-agreements --silent | Out-Host
+		if ($LASTEXITCODE -eq 0) {
+			return $true
+		}
+	}
+
+	return $false
+}
+
 $PythonExe = Resolve-PythonExe -RequestedPythonExe $PythonExe
 if (-not $PythonExe) {
-	Write-Error "Python was not found. Pass -PythonExe or install Python 3 with the py launcher or python on PATH."
+	Write-Host "Python not found. Attempting automatic install with winget..." -ForegroundColor Yellow
+	$installed = Try-InstallPython
+	if ($installed) {
+		$PythonExe = Resolve-PythonExe -RequestedPythonExe ""
+	}
+}
+
+if (-not $PythonExe) {
+	Write-Error "Python was not found and could not be auto-installed. Pass -PythonExe or install Python 3 with winget/the py launcher/python on PATH."
 	exit 1
 }
 
@@ -67,8 +93,26 @@ if ($Clean) {
 	Get-ChildItem -Filter "*.spec" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+Write-Host "Ensuring pip is available..." -ForegroundColor Cyan
+& $PythonExe @pythonBaseArgs -m ensurepip --upgrade | Out-Host
+if ($LASTEXITCODE -ne 0) {
+	Write-Error "Failed to ensure pip is available."
+	exit $LASTEXITCODE
+}
+
+$buildPackages = @(
+	"pip",
+	"setuptools",
+	"wheel",
+	"pyinstaller",
+	"imageio-ffmpeg",
+	"opencv-python",
+	"pillow",
+	"numpy"
+)
+
 Write-Host "Installing build dependencies..." -ForegroundColor Cyan
-& $PythonExe @pythonBaseArgs -m pip install --upgrade pyinstaller imageio-ffmpeg opencv-python pillow "numpy<2.5" librosa soundfile | Out-Host
+& $PythonExe @pythonBaseArgs -m pip install --upgrade @buildPackages | Out-Host
 if ($LASTEXITCODE -ne 0) {
 	Write-Error "Failed to install build dependencies."
 	exit $LASTEXITCODE
