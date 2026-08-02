@@ -68,7 +68,7 @@ class Config:
     input_path: str
     output_path: str
     cols: int = 120
-    charset: str = " .:-=+*#%@"           # dark -> light ramp for foreground luminance
+    charset: str = " .:-=+*#%@"          # dark -> light ramp for foreground luminance
     font_path: str = None                 # None = auto-detect a system monospace font
     cell_w: int = 10                      # px width of one rendered character cell
     cell_h: int = 18                      # px height of one rendered character cell
@@ -89,6 +89,7 @@ class Config:
     fg_palette: list = field(default_factory=lambda: [(255, 0, 80), (0, 255, 255), (255, 255, 0)])
 
     bpm: float = None                     # None = no beat sync, colors stay static
+    auto_beats: bool = False              # detect beats from the input video's own audio track
     brightness_clamp: float = 1.0         # 0-1, scales random colors down (photosensitivity safety)
     seed: int = None
 
@@ -179,6 +180,48 @@ class BeatClock:
             self.last_beat_num = beat_num
             return True
         return False
+
+
+class DetectedBeatClock:
+    """Beat clock driven by real detected beat timestamps (from librosa) rather than
+    an assumed-constant BPM. Handles tempo drift, rubato, and breaks correctly since
+    it's following actual audio transients, not a metronome grid."""
+
+    def __init__(self, beat_times_sec, fps):
+        # round each beat time to nearest video frame, dedupe (two beats landing on
+        # the same frame at low fps would otherwise double-fire)
+        frames = sorted(set(int(round(t * fps)) for t in beat_times_sec))
+        self.beat_frames = frames
+        self._ptr = 0
+
+    def is_beat(self, frame_idx):
+        # advance past any beat frames at or before this frame; fire if we crossed any
+        fired = False
+        while self._ptr < len(self.beat_frames) and self.beat_frames[self._ptr] <= frame_idx:
+            fired = True
+            self._ptr += 1
+        return fired
+
+
+def detect_beats(path):
+    """Detect beat timestamps (seconds) from a video/audio file's audio track.
+    Returns (beat_times_sec: list[float], estimated_tempo: float) or raises if
+    librosa isn't installed or the file has no usable audio track."""
+    try:
+        import librosa
+    except ImportError as e:
+        raise RuntimeError(
+            "Auto beat detection requires librosa. Install with: pip install librosa soundfile"
+        ) from e
+
+    y, sr = librosa.load(path, sr=None, mono=True)
+    if y is None or len(y) == 0:
+        raise RuntimeError(f"No audio data could be read from {path}")
+
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+    tempo_val = float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo)
+    return list(beat_times), tempo_val
 
 
 # --------------------------------------------------------------------------
@@ -333,7 +376,14 @@ def convert(cfg: Config, max_frames=None, progress_every=30, cancel_event=None):
     out_w = cfg.out_w or cfg.cols * cfg.cell_w
     writer = None  # created after first frame once we know rows
 
-    beat_clock = BeatClock(cfg.bpm, fps)
+    if cfg.auto_beats:
+        print("Detecting beats from audio track...", file=sys.stderr)
+        beat_times, tempo_val = detect_beats(cfg.input_path)
+        print(f"  found {len(beat_times)} beats, estimated avg tempo ~{tempo_val:.1f} BPM",
+              file=sys.stderr)
+        beat_clock = DetectedBeatClock(beat_times, fps)
+    else:
+        beat_clock = BeatClock(cfg.bpm, fps)
     ramp = cfg.charset
     ramp_idx_lut = np.array([char_to_idx[c] for c in ramp])
 
@@ -463,6 +513,9 @@ def build_argparser():
     p.add_argument("--fg-palette", default="ff0050,00ffff,ffff00")
 
     p.add_argument("--bpm", type=float, default=None)
+    p.add_argument("--auto-beats", action="store_true",
+                    help="Detect beats from the input video's own audio track instead of "
+                         "assuming a fixed BPM. Requires librosa (pip install librosa soundfile).")
     p.add_argument("--brightness-clamp", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--transparent-bg", action="store_true",
@@ -494,6 +547,7 @@ def main():
         bg_palette=parse_color_list(args.bg_palette),
         fg_palette=parse_color_list(args.fg_palette),
         bpm=args.bpm,
+        auto_beats=args.auto_beats,
         brightness_clamp=args.brightness_clamp,
         seed=args.seed,
         transparent_bg=args.transparent_bg,
